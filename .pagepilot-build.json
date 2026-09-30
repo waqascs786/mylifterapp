@@ -1,0 +1,16 @@
+{
+    "trigger_id": "e46360fc-0fe6-42b6-bc7e-edc25c3f0e79",
+    "platform": "android",
+    "app_name": "My Lifter App",
+    "package_name": "com.lftlms.app",
+    "primary_color": "#0073aa",
+    "api_url": "https://the-tvpp.com",
+    "build_number": "1",
+    "app_icon_url": "https://the-tvpp.com/wp-content/uploads/2026/09/fangs.png",
+    "ios_team_id": "4FRC5AB7WK",
+    "asc_key_id": "27R5DCZJ59",
+    "asc_issuer_id": "d030b39b-d9b7-4128-88b5-ab386e267e7e",
+    "appetize_token": "tok_ibz2kvzvpn75lbpmi2hcvlasae",
+    "appetize_android_key": "",
+    "appetize_ios_key": ""
+}

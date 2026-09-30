@@ -1,0 +1,1676 @@
+name: Build Mobile App
+
+on:
+  push:
+    paths:
+      - '.pagepilot-build.json'
+
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Target platform'
+        required: true
+        default: 'android'
+        type: choice
+        options:
+          - android
+          - aab
+          - ios
+          - ios_release
+      app_name:
+        description: 'Application name'
+        required: false
+        default: 'PagePilot'
+      package_name:
+        description: 'Package name'
+        required: false
+        default: 'com.pagepilot.app'
+      primary_color:
+        description: 'Primary color (hex)'
+        required: false
+        default: '#4F46E5'
+      api_url:
+        description: 'WordPress API URL'
+        required: false
+        default: 'https://example.com/wp-json'
+      build_number:
+        description: 'Build number'
+        required: false
+        default: '1'
+      app_icon_url:
+        description: 'App icon image URL (1024x1024 PNG)'
+        required: false
+        default: ''
+      ios_team_id:
+        description: 'Apple Team ID (ios_release)'
+        required: false
+        default: ''
+      asc_key_id:
+        description: 'App Store Connect Key ID (ios_release)'
+        required: false
+        default: ''
+      asc_issuer_id:
+        description: 'App Store Connect Issuer ID (ios_release)'
+        required: false
+        default: ''
+
+  repository_dispatch:
+    types: [pagepilot_build]
+
+env:
+  APP_NAME: ${{ github.event.inputs.app_name || github.event.client_payload.app_name || 'PagePilot' }}
+  PACKAGE_NAME: ${{ github.event.inputs.package_name || github.event.client_payload.app_package || github.event.client_payload.package_name || 'com.pagepilot.app' }}
+  PRIMARY_COLOR: ${{ github.event.inputs.primary_color || github.event.client_payload.primary_color || '#4F46E5' }}
+  API_URL: ${{ github.event.inputs.api_url || github.event.client_payload.api_url || 'https://example.com/wp-json' }}
+  BUILD_NUMBER: ${{ github.event.inputs.build_number || github.event.client_payload.build_number || '1' }}
+  PLATFORM: ${{ github.event.inputs.platform || github.event.client_payload.platform || 'android' }}
+  APP_ICON_URL: ${{ github.event.inputs.app_icon_url || github.event.client_payload.logo_url || github.event.client_payload.app_icon_url || '' }}
+  IOS_TEAM_ID: ${{ github.event.inputs.ios_team_id || github.event.client_payload.ios_team_id || secrets.IOS_TEAM_ID || '' }}
+  ASC_KEY_ID: ${{ github.event.inputs.asc_key_id || github.event.client_payload.asc_key_id || secrets.ASC_KEY_ID || '' }}
+  ASC_ISSUER_ID: ${{ github.event.inputs.asc_issuer_id || github.event.client_payload.asc_issuer_id || secrets.ASC_ISSUER_ID || '' }}
+  APPETIZE_TOKEN: ${{ github.event.client_payload.appetize_token || secrets.APPETIZE_TOKEN || '' }}
+  APPETIZE_ANDROID_KEY: ${{ github.event.client_payload.appetize_android_key || secrets.APPETIZE_ANDROID_KEY || '' }}
+  APPETIZE_IOS_KEY: ${{ github.event.client_payload.appetize_ios_key || secrets.APPETIZE_IOS_KEY || '' }}
+
+jobs:
+  # ===========================================================================
+  # Read build config for push-triggered builds
+  # ===========================================================================
+  configure:
+    name: Configure
+    runs-on: ubuntu-latest
+    if: ${{ always() }}
+    outputs:
+      platform: ${{ steps.cfg.outputs.platform }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: cfg
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ -f ".pagepilot-build.json" ]; then
+            PLATFORM=$(python3 -c "import json; print(json.load(open('.pagepilot-build.json')).get('platform','android'))")
+          elif [ -n "${{ github.event.inputs.platform }}" ]; then
+            PLATFORM="${{ github.event.inputs.platform }}"
+          elif [ -n "${{ github.event.client_payload.platform }}" ]; then
+            PLATFORM="${{ github.event.client_payload.platform }}"
+          else
+            PLATFORM=android
+          fi
+          echo "platform=$PLATFORM" >> "$GITHUB_OUTPUT"
+          echo "Resolved platform: $PLATFORM"
+
+  # ===========================================================================
+  # Android Build — Signed release APK
+  # ===========================================================================
+  build-android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    needs: [configure]
+    if: ${{ always() && !cancelled() && (github.event.inputs.platform == 'android' || github.event.client_payload.platform == 'android' || needs.configure.outputs.platform == 'android' || (needs.configure.result != 'success' && !github.event.inputs.platform && !github.event.client_payload.platform && github.event_name != 'push')) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Read build config (push events)
+        if: github.event_name == 'push'
+        run: |
+          if [ -f ".pagepilot-build.json" ]; then
+            python3 -c "
+          import json, os
+          with open('.pagepilot-build.json') as f:
+              cfg = json.load(f)
+          out = os.environ['GITHUB_ENV']
+          mapping = {
+              'platform': 'PLATFORM',
+              'app_name': 'APP_NAME',
+              'package_name': 'PACKAGE_NAME',
+              'primary_color': 'PRIMARY_COLOR',
+              'api_url': 'API_URL',
+              'build_number': 'BUILD_NUMBER',
+              'app_icon_url': 'APP_ICON_URL',
+              'ios_team_id': 'IOS_TEAM_ID',
+              'asc_key_id': 'ASC_KEY_ID',
+              'asc_issuer_id': 'ASC_ISSUER_ID',
+              'appetize_token': 'APPETIZE_TOKEN',
+              'appetize_android_key': 'APPETIZE_ANDROID_KEY',
+              'appetize_ios_key': 'APPETIZE_IOS_KEY',
+          }
+          with open(out, 'a') as o:
+              for key, env_key in mapping.items():
+                  val = cfg.get(key, '')
+                  if val:
+                      o.write(f'{env_key}={val}\n')
+          "
+            echo "Build config loaded from .pagepilot-build.json"
+          fi
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'
+          channel: 'stable'
+
+      - name: Flutter version
+        run: flutter --version
+
+      - name: Save our Dart code
+        run: |
+          cp -R lib /tmp/pagepilot_lib
+          cp pubspec.yaml /tmp/pagepilot_pubspec.yaml
+          cp pubspec.lock /tmp/pagepilot_pubspec.lock 2>/dev/null || true
+          cp analysis_options.yaml /tmp/pagepilot_analysis.yaml 2>/dev/null || true
+          cp flutter_launcher_icons.yaml /tmp/pagepilot_icons.yaml 2>/dev/null || true
+
+      - name: Generate Flutter scaffold
+        run: |
+          # Derive org and project name from PACKAGE_NAME (e.g. com.pagepilot.app -> org=com.pagepilot, project=app)
+          PKG="${{ env.PACKAGE_NAME }}"
+          LAST="${PKG##*.}"
+          ORG="${PKG%.$LAST}"
+          # Dart package names must be lowercase_with_underscores.
+          PROJ=$(echo "$LAST" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
+          flutter create --project-name "$PROJ" --org "$ORG" --platforms android .
+          cp /tmp/pagepilot_pubspec.yaml pubspec.yaml
+          cp /tmp/pagepilot_pubspec.lock pubspec.lock 2>/dev/null || true
+          cp /tmp/pagepilot_analysis.yaml analysis_options.yaml 2>/dev/null || true
+          cp /tmp/pagepilot_icons.yaml flutter_launcher_icons.yaml 2>/dev/null || true
+          rm -rf test/
+          sed -i 's/id "org.jetbrains.kotlin.android" version ".*"/id "org.jetbrains.kotlin.android" version "2.0.0"/' android/settings.gradle
+          if ! grep -q "android.permission.INTERNET" android/app/src/main/AndroidManifest.xml; then
+            sed -i '/<manifest/a\    <uses-permission android:name="android.permission.INTERNET"/>' android/app/src/main/AndroidManifest.xml
+          fi
+
+      - name: Apply app name to Android manifest
+        run: |
+          python3 <<'PY'
+          import os, re, pathlib
+          app_name = os.environ.get('APP_NAME', 'PagePilot').replace('"', '\\"')
+          manifest = pathlib.Path('android/app/src/main/AndroidManifest.xml')
+          text = manifest.read_text()
+          text = re.sub(r'android:label="[^"]*"', f'android:label="{app_name}"', text, count=1)
+          manifest.write_text(text)
+          print(f'Android label set to: {app_name}')
+          PY
+
+      - name: Download app icon and generate launcher icons
+        if: env.APP_ICON_URL != ''
+        run: |
+          set -e
+          mkdir -p assets/images
+          flutter pub get
+          curl -fsSL "${APP_ICON_URL}" -o assets/images/app_icon.png
+          # Some CDNs serve WebP under a .png name — convert to real PNG for flutter_launcher_icons.
+          if file assets/images/app_icon.png | grep -qi 'web/p\|webp'; then
+            if command -v sips >/dev/null 2>&1; then
+              sips -s format png assets/images/app_icon.png --out assets/images/app_icon_converted.png >/dev/null
+              mv assets/images/app_icon_converted.png assets/images/app_icon.png
+            else
+              python3 - <<'PY'
+          from pathlib import Path
+          try:
+              from PIL import Image
+          except ImportError:
+              raise SystemExit(0)
+          p = Path('assets/images/app_icon.png')
+          img = Image.open(p)
+          img.save(p, format='PNG')
+          PY
+            fi
+          fi
+          BG="${PRIMARY_COLOR:-#FFFFFF}"
+          printf '%s\n' \
+            'flutter_launcher_icons:' \
+            '  android: true' \
+            '  ios: false' \
+            '  image_path: "assets/images/app_icon.png"' \
+            "  adaptive_icon_background: \"${BG}\"" \
+            '  adaptive_icon_foreground: "assets/images/app_icon.png"' \
+            > flutter_launcher_icons.yaml
+          echo "flutter_launcher_icons.yaml:"
+          cat flutter_launcher_icons.yaml
+          dart run flutter_launcher_icons
+
+      - name: Restore Dart code
+        run: |
+          rm -rf lib
+          cp -R /tmp/pagepilot_lib lib
+
+      # Android release keystore: decode from secret if available, else generate a new one.
+      - name: Setup Android signing keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS_SECRET: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS_SECRET: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          KEYSTORE_DIR="$HOME/.android-keystore"
+          mkdir -p "$KEYSTORE_DIR"
+          KEYSTORE_PATH="$KEYSTORE_DIR/release-key.jks"
+
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "Decoding existing keystore from repository secret..."
+            echo "$KEYSTORE_B64" | base64 -d > "$KEYSTORE_PATH"
+            KEYSTORE_PASSWORD="$STORE_PASS"
+            KEY_ALIAS="${KEY_ALIAS_SECRET:-pagepilot}"
+            KEY_PASSWORD="$KEY_PASS_SECRET"
+          else
+            echo "No keystore found in secrets. Generating a new one..."
+            KEYSTORE_PASSWORD="pagepilot123"
+            KEY_ALIAS="pagepilot"
+            KEY_PASSWORD="pagepilot123"
+
+            keytool -genkeypair -v \
+              -keystore "$KEYSTORE_PATH" \
+              -alias "$KEY_ALIAS" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -storepass "$KEYSTORE_PASSWORD" \
+              -keypass "$KEY_PASSWORD" \
+              -dname "CN=PagePilot, OU=Mobile, O=PagePilot, L=Unknown, ST=Unknown, C=US"
+
+            echo "Keystore generated. Save as GitHub secret ANDROID_KEYSTORE_BASE64 for future builds."
+          fi
+
+          echo "KEYSTORE_PATH=$KEYSTORE_PATH" >> $GITHUB_ENV
+          echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> $GITHUB_ENV
+          echo "KEY_ALIAS=$KEY_ALIAS" >> $GITHUB_ENV
+          echo "KEY_PASSWORD=$KEY_PASSWORD" >> $GITHUB_ENV
+          echo "KEYSTORE_B64=$KEYSTORE_B64" >> $GITHUB_ENV
+
+      - name: Configure Android release signing
+        run: |
+          KEYSTORE_DIR="$HOME/.android-keystore"
+          # Write key.properties for Flutter/Gradle signing.
+          cat > "$KEYSTORE_DIR/key.properties" <<EOF
+          storePassword=$KEYSTORE_PASSWORD
+          keyPassword=$KEY_PASSWORD
+          keyAlias=$KEY_ALIAS
+          storeFile=$KEYSTORE_DIR/release-key.jks
+          EOF
+
+          # Update android/app/build.gradle to use release signing.
+          GRADLE_FILE="android/app/build.gradle"
+          sed -i '/buildTypes {/,$d' "$GRADLE_FILE"
+
+          cat >> "$GRADLE_FILE" <<'GRADLE'
+              signingConfigs {
+                  release {
+                      storeFile file(System.getenv("HOME") + "/.android-keystore/release-key.jks")
+                      storePassword System.getenv("KEYSTORE_PASSWORD")
+                      keyAlias System.getenv("KEY_ALIAS")
+                      keyPassword System.getenv("KEY_PASSWORD")
+                  }
+              }
+              buildTypes {
+                  release {
+                      signingConfig signingConfigs.release
+                  }
+              }
+          }
+          GRADLE
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Analyze code
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+
+      - name: Build Android APK (signed release)
+        run: flutter build apk --release
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk-${{ env.BUILD_NUMBER }}
+          path: build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 30
+
+      # Save keystore as artifact so the user can download it and store as a secret.
+      - name: Save keystore artifact (if newly generated)
+        if: env.KEYSTORE_B64 == ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-keystore-${{ env.BUILD_NUMBER }}
+          path: /home/runner/.android-keystore/release-key.jks
+          retention-days: 90
+
+      - name: Upload to Appetize.io (Android)
+        if: env.APPETIZE_TOKEN != ''
+        run: |
+          APK_PATH="build/app/outputs/flutter-apk/app-release.apk"
+          if [ ! -f "$APK_PATH" ]; then
+            echo "APK not found at $APK_PATH"
+            exit 1
+          fi
+          echo "Uploading Android APK to Appetize.io..."
+          echo "Token: ${APPETIZE_TOKEN:0:10}..."
+          if [ -n "$APPETIZE_ANDROID_KEY" ]; then
+            echo "Updating existing app: $APPETIZE_ANDROID_KEY"
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+              "https://api.appetize.io/v1/apps/${APPETIZE_ANDROID_KEY}" \
+              -H "X-API-KEY: ${APPETIZE_TOKEN}" \
+              -H "Content-Type: multipart/form-data" \
+              -F "file=@${APK_PATH}")
+          else
+            echo "Creating new Android app on Appetize.io..."
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+              "https://api.appetize.io/v1/apps" \
+              -H "X-API-KEY: ${APPETIZE_TOKEN}" \
+              -H "Content-Type: multipart/form-data" \
+              -F "file=@${APK_PATH}" \
+              -F "platform=android" \
+              -F "queueDuration=0")
+          fi
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          echo "HTTP Status: $HTTP_CODE"
+          echo "Response: $BODY"
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+            APP_KEY=$(echo "$BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('key',''))" 2>/dev/null || echo "")
+            if [ -n "$APP_KEY" ]; then
+              echo "Appetize.io Android app key: $APP_KEY"
+              echo "View at: https://appetize.io/app/$APP_KEY"
+            fi
+          else
+            echo "Warning: Appetize.io upload failed with HTTP $HTTP_CODE"
+          fi
+
+
+  # ===========================================================================
+  # Android AAB Build — Signed release App Bundle (Google Play)
+  # ===========================================================================
+  build-android-aab:
+    name: Build Android AAB (Play Store)
+    runs-on: ubuntu-latest
+    needs: [configure]
+    if: ${{ always() && !cancelled() && (github.event.inputs.platform == 'aab' || github.event.client_payload.platform == 'aab' || needs.configure.outputs.platform == 'aab' || (needs.configure.result != 'success' && !github.event.inputs.platform && !github.event.client_payload.platform && github.event_name != 'push')) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Read build config (push events)
+        if: github.event_name == 'push'
+        run: |
+          if [ -f ".pagepilot-build.json" ]; then
+            python3 -c "
+          import json, os
+          with open('.pagepilot-build.json') as f:
+              cfg = json.load(f)
+          out = os.environ['GITHUB_ENV']
+          mapping = {
+              'platform': 'PLATFORM',
+              'app_name': 'APP_NAME',
+              'package_name': 'PACKAGE_NAME',
+              'primary_color': 'PRIMARY_COLOR',
+              'api_url': 'API_URL',
+              'build_number': 'BUILD_NUMBER',
+              'app_icon_url': 'APP_ICON_URL',
+              'ios_team_id': 'IOS_TEAM_ID',
+              'asc_key_id': 'ASC_KEY_ID',
+              'asc_issuer_id': 'ASC_ISSUER_ID',
+              'appetize_token': 'APPETIZE_TOKEN',
+              'appetize_android_key': 'APPETIZE_ANDROID_KEY',
+              'appetize_ios_key': 'APPETIZE_IOS_KEY',
+          }
+          with open(out, 'a') as o:
+              for key, env_key in mapping.items():
+                  val = cfg.get(key, '')
+                  if val:
+                      o.write(f'{env_key}={val}\n')
+          "
+            echo "Build config loaded from .pagepilot-build.json"
+          fi
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'
+          channel: 'stable'
+
+      - name: Flutter version
+        run: flutter --version
+
+      - name: Save our Dart code
+        run: |
+          cp -R lib /tmp/pagepilot_lib
+          cp pubspec.yaml /tmp/pagepilot_pubspec.yaml
+          cp pubspec.lock /tmp/pagepilot_pubspec.lock 2>/dev/null || true
+          cp analysis_options.yaml /tmp/pagepilot_analysis.yaml 2>/dev/null || true
+          cp flutter_launcher_icons.yaml /tmp/pagepilot_icons.yaml 2>/dev/null || true
+
+      - name: Generate Flutter scaffold
+        run: |
+          # Derive org and project name from PACKAGE_NAME (e.g. com.pagepilot.app -> org=com.pagepilot, project=app)
+          PKG="${{ env.PACKAGE_NAME }}"
+          LAST="${PKG##*.}"
+          ORG="${PKG%.$LAST}"
+          # Dart package names must be lowercase_with_underscores.
+          PROJ=$(echo "$LAST" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
+          flutter create --project-name "$PROJ" --org "$ORG" --platforms android .
+          cp /tmp/pagepilot_pubspec.yaml pubspec.yaml
+          cp /tmp/pagepilot_pubspec.lock pubspec.lock 2>/dev/null || true
+          cp /tmp/pagepilot_analysis.yaml analysis_options.yaml 2>/dev/null || true
+          cp /tmp/pagepilot_icons.yaml flutter_launcher_icons.yaml 2>/dev/null || true
+          rm -rf test/
+          sed -i 's/id "org.jetbrains.kotlin.android" version ".*"/id "org.jetbrains.kotlin.android" version "2.0.0"/' android/settings.gradle
+          if ! grep -q "android.permission.INTERNET" android/app/src/main/AndroidManifest.xml; then
+            sed -i '/<manifest/a\    <uses-permission android:name="android.permission.INTERNET"/>' android/app/src/main/AndroidManifest.xml
+          fi
+
+      - name: Apply app name to Android manifest
+        run: |
+          python3 <<'PY'
+          import os, re, pathlib
+          app_name = os.environ.get('APP_NAME', 'PagePilot').replace('"', '\\"')
+          manifest = pathlib.Path('android/app/src/main/AndroidManifest.xml')
+          text = manifest.read_text()
+          text = re.sub(r'android:label="[^"]*"', f'android:label="{app_name}"', text, count=1)
+          manifest.write_text(text)
+          print(f'Android label set to: {app_name}')
+          PY
+
+      - name: Download app icon and generate launcher icons
+        if: env.APP_ICON_URL != ''
+        run: |
+          set -e
+          mkdir -p assets/images
+          flutter pub get
+          curl -fsSL "${APP_ICON_URL}" -o assets/images/app_icon.png
+          # Some CDNs serve WebP under a .png name — convert to real PNG for flutter_launcher_icons.
+          if file assets/images/app_icon.png | grep -qi 'web/p\|webp'; then
+            if command -v sips >/dev/null 2>&1; then
+              sips -s format png assets/images/app_icon.png --out assets/images/app_icon_converted.png >/dev/null
+              mv assets/images/app_icon_converted.png assets/images/app_icon.png
+            else
+              python3 - <<'PY'
+          from pathlib import Path
+          try:
+              from PIL import Image
+          except ImportError:
+              raise SystemExit(0)
+          p = Path('assets/images/app_icon.png')
+          img = Image.open(p)
+          img.save(p, format='PNG')
+          PY
+            fi
+          fi
+          BG="${PRIMARY_COLOR:-#FFFFFF}"
+          printf '%s\n' \
+            'flutter_launcher_icons:' \
+            '  android: true' \
+            '  ios: false' \
+            '  image_path: "assets/images/app_icon.png"' \
+            "  adaptive_icon_background: \"${BG}\"" \
+            '  adaptive_icon_foreground: "assets/images/app_icon.png"' \
+            > flutter_launcher_icons.yaml
+          echo "flutter_launcher_icons.yaml:"
+          cat flutter_launcher_icons.yaml
+          dart run flutter_launcher_icons
+
+      - name: Restore Dart code
+        run: |
+          rm -rf lib
+          cp -R /tmp/pagepilot_lib lib
+
+      # Android release keystore: decode from secret if available, else generate a new one.
+      - name: Setup Android signing keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS_SECRET: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS_SECRET: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          KEYSTORE_DIR="$HOME/.android-keystore"
+          mkdir -p "$KEYSTORE_DIR"
+          KEYSTORE_PATH="$KEYSTORE_DIR/release-key.jks"
+
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "Decoding existing keystore from repository secret..."
+            echo "$KEYSTORE_B64" | base64 -d > "$KEYSTORE_PATH"
+            KEYSTORE_PASSWORD="$STORE_PASS"
+            KEY_ALIAS="${KEY_ALIAS_SECRET:-pagepilot}"
+            KEY_PASSWORD="$KEY_PASS_SECRET"
+          else
+            echo "No keystore found in secrets. Generating a new one..."
+            KEYSTORE_PASSWORD="pagepilot123"
+            KEY_ALIAS="pagepilot"
+            KEY_PASSWORD="pagepilot123"
+
+            keytool -genkeypair -v \
+              -keystore "$KEYSTORE_PATH" \
+              -alias "$KEY_ALIAS" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -storepass "$KEYSTORE_PASSWORD" \
+              -keypass "$KEY_PASSWORD" \
+              -dname "CN=PagePilot, OU=Mobile, O=PagePilot, L=Unknown, ST=Unknown, C=US"
+
+            echo "Keystore generated. Save as GitHub secret ANDROID_KEYSTORE_BASE64 for future builds."
+          fi
+
+          echo "KEYSTORE_PATH=$KEYSTORE_PATH" >> $GITHUB_ENV
+          echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> $GITHUB_ENV
+          echo "KEY_ALIAS=$KEY_ALIAS" >> $GITHUB_ENV
+          echo "KEY_PASSWORD=$KEY_PASSWORD" >> $GITHUB_ENV
+          echo "KEYSTORE_B64=$KEYSTORE_B64" >> $GITHUB_ENV
+
+      - name: Configure Android release signing
+        run: |
+          KEYSTORE_DIR="$HOME/.android-keystore"
+          # Write key.properties for Flutter/Gradle signing.
+          cat > "$KEYSTORE_DIR/key.properties" <<EOF
+          storePassword=$KEYSTORE_PASSWORD
+          keyPassword=$KEY_PASSWORD
+          keyAlias=$KEY_ALIAS
+          storeFile=$KEYSTORE_DIR/release-key.jks
+          EOF
+
+          # Update android/app/build.gradle to use release signing.
+          GRADLE_FILE="android/app/build.gradle"
+          sed -i '/buildTypes {/,$d' "$GRADLE_FILE"
+
+          cat >> "$GRADLE_FILE" <<'GRADLE'
+              signingConfigs {
+                  release {
+                      storeFile file(System.getenv("HOME") + "/.android-keystore/release-key.jks")
+                      storePassword System.getenv("KEYSTORE_PASSWORD")
+                      keyAlias System.getenv("KEY_ALIAS")
+                      keyPassword System.getenv("KEY_PASSWORD")
+                  }
+              }
+              buildTypes {
+                  release {
+                      signingConfig signingConfigs.release
+                  }
+              }
+          }
+          GRADLE
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Analyze code
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+
+      - name: Build Android AAB (signed release)
+        run: flutter build appbundle --release
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-aab-${{ env.BUILD_NUMBER }}
+          path: build/app/outputs/bundle/release/app-release.aab
+          retention-days: 30
+
+      # Save keystore as artifact so the user can download it and store as a secret.
+      - name: Save keystore artifact (if newly generated)
+        if: env.KEYSTORE_B64 == ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-keystore-${{ env.BUILD_NUMBER }}
+          path: /home/runner/.android-keystore/release-key.jks
+          retention-days: 90
+  # ===========================================================================
+
+  # iOS Simulator Build — for testing (no Apple signing required)
+  # ===========================================================================
+  build-ios:
+    name: Build iOS Simulator
+    runs-on: macos-latest
+    needs: [configure]
+    if: ${{ always() && !cancelled() && (github.event.inputs.platform == 'ios' || github.event.client_payload.platform == 'ios' || needs.configure.outputs.platform == 'ios') }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Read build config (push events)
+        if: github.event_name == 'push'
+        run: |
+          if [ -f ".pagepilot-build.json" ]; then
+            python3 -c "
+          import json, os
+          with open('.pagepilot-build.json') as f:
+              cfg = json.load(f)
+          out = os.environ['GITHUB_ENV']
+          mapping = {
+              'platform': 'PLATFORM',
+              'app_name': 'APP_NAME',
+              'package_name': 'PACKAGE_NAME',
+              'primary_color': 'PRIMARY_COLOR',
+              'api_url': 'API_URL',
+              'build_number': 'BUILD_NUMBER',
+              'app_icon_url': 'APP_ICON_URL',
+              'ios_team_id': 'IOS_TEAM_ID',
+              'asc_key_id': 'ASC_KEY_ID',
+              'asc_issuer_id': 'ASC_ISSUER_ID',
+              'appetize_token': 'APPETIZE_TOKEN',
+              'appetize_android_key': 'APPETIZE_ANDROID_KEY',
+              'appetize_ios_key': 'APPETIZE_IOS_KEY',
+          }
+          with open(out, 'a') as o:
+              for key, env_key in mapping.items():
+                  val = cfg.get(key, '')
+                  if val:
+                      o.write(f'{env_key}={val}\n')
+          "
+            echo "Build config loaded from .pagepilot-build.json"
+          fi
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'
+          channel: 'stable'
+
+      - name: Flutter version
+        run: flutter --version
+
+      - name: Save our Dart code
+        run: |
+          cp -R lib /tmp/pagepilot_lib
+          cp pubspec.yaml /tmp/pagepilot_pubspec.yaml
+          cp pubspec.lock /tmp/pagepilot_pubspec.lock 2>/dev/null || true
+          cp analysis_options.yaml /tmp/pagepilot_analysis.yaml 2>/dev/null || true
+          cp flutter_launcher_icons.yaml /tmp/pagepilot_icons.yaml 2>/dev/null || true
+
+      - name: Generate Flutter scaffold (from settings)
+        run: |
+          PKG="${PACKAGE_NAME:-com.pagepilot.app}"
+          LAST="${PKG##*.}"
+          ORG="${PKG%.$LAST}"
+          PROJ=$(echo "$LAST" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
+          flutter create --project-name "$PROJ" --org "$ORG" --platforms ios .
+          cp /tmp/pagepilot_pubspec.yaml pubspec.yaml
+          cp /tmp/pagepilot_pubspec.lock pubspec.lock 2>/dev/null || true
+          cp /tmp/pagepilot_analysis.yaml analysis_options.yaml 2>/dev/null || true
+          cp /tmp/pagepilot_icons.yaml flutter_launcher_icons.yaml 2>/dev/null || true
+          rm -rf test/
+
+      - name: Apply app name and bundle ID to iOS
+        run: |
+          python3 <<'PY'
+          import os, pathlib, re
+          app_name = os.environ.get('APP_NAME', 'PagePilot')
+          bundle = os.environ.get('PACKAGE_NAME', 'com.pagepilot.app')
+
+          plist = pathlib.Path('ios/Runner/Info.plist')
+          if plist.exists():
+              text = plist.read_text()
+              # CFBundleDisplayName / CFBundleName
+              def set_plist_string(xml, key, value):
+                  pattern = rf'(<key>{re.escape(key)}</key>\s*<string>)[^<]*(</string>)'
+                  if re.search(pattern, xml):
+                      return re.sub(pattern, rf'\g<1>{value}\g<2>', xml, count=1)
+                  return xml
+              text = set_plist_string(text, 'CFBundleDisplayName', app_name)
+              text = set_plist_string(text, 'CFBundleName', app_name)
+              plist.write_text(text)
+              print(f'iOS display name: {app_name}')
+
+          # Ensure PRODUCT_BUNDLE_IDENTIFIER matches settings.
+          pbx = pathlib.Path('ios/Runner.xcodeproj/project.pbxproj')
+          if pbx.exists():
+              text = pbx.read_text()
+              text = re.sub(
+                  r'PRODUCT_BUNDLE_IDENTIFIER = [^;]+;',
+                  f'PRODUCT_BUNDLE_IDENTIFIER = {bundle};',
+                  text,
+              )
+              text = re.sub(
+                  r'IPHONEOS_DEPLOYMENT_TARGET = [^;]+;',
+                  'IPHONEOS_DEPLOYMENT_TARGET = 15.0;',
+                  text,
+              )
+              pbx.write_text(text)
+              print(f'iOS bundle ID: {bundle}')
+          PY
+
+      - name: Download app icon and generate launcher icons
+        if: env.APP_ICON_URL != ''
+        run: |
+          set -e
+          mkdir -p assets/images
+          flutter pub get
+          curl -fsSL "${APP_ICON_URL}" -o assets/images/app_icon.png
+          if file assets/images/app_icon.png | grep -qi 'web/p\|webp'; then
+            if command -v sips >/dev/null 2>&1; then
+              sips -s format png assets/images/app_icon.png --out assets/images/app_icon_converted.png >/dev/null
+              mv assets/images/app_icon_converted.png assets/images/app_icon.png
+            else
+              python3 - <<'PY'
+          from pathlib import Path
+          try:
+              from PIL import Image
+          except ImportError:
+              raise SystemExit(0)
+          p = Path('assets/images/app_icon.png')
+          img = Image.open(p)
+          img.save(p, format='PNG')
+          PY
+            fi
+          fi
+          BG="${PRIMARY_COLOR:-#FFFFFF}"
+          printf '%s\n' \
+            'flutter_launcher_icons:' \
+            '  android: false' \
+            '  ios: true' \
+            '  image_path: "assets/images/app_icon.png"' \
+            '  remove_alpha_ios: true' \
+            > flutter_launcher_icons.yaml
+          echo "flutter_launcher_icons.yaml:"
+          cat flutter_launcher_icons.yaml
+          dart run flutter_launcher_icons
+
+      - name: Restore Dart code
+        run: |
+          rm -rf lib
+          cp -R /tmp/pagepilot_lib lib
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Analyze code
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+
+      - name: Build iOS Simulator
+        run: flutter build ios --simulator --no-codesign
+
+      - name: Create iOS build zip
+        run: cd build/ios/iphonesimulator && zip -r ios-build-${{ env.BUILD_NUMBER }}.zip ./
+
+      - name: Upload iOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-${{ env.BUILD_NUMBER }}
+          path: build/ios/iphonesimulator/ios-build-${{ env.BUILD_NUMBER }}.zip
+          retention-days: 30
+
+      - name: Upload to Appetize.io (iOS)
+        if: env.APPETIZE_TOKEN != ''
+        run: |
+          IOS_ZIP="build/ios/iphonesimulator/ios-build-${{ env.BUILD_NUMBER }}.zip"
+          if [ ! -f "$IOS_ZIP" ]; then
+            echo "iOS build zip not found at $IOS_ZIP"
+            exit 1
+          fi
+          echo "Uploading iOS build to Appetize.io..."
+          if [ -n "$APPETIZE_IOS_KEY" ]; then
+            echo "Updating existing app: $APPETIZE_IOS_KEY"
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+              "https://api.appetize.io/v1/apps/${APPETIZE_IOS_KEY}" \
+              -H "X-API-KEY: ${APPETIZE_TOKEN}" \
+              -H "Content-Type: multipart/form-data" \
+              -F "file=@${IOS_ZIP}")
+          else
+            echo "Creating new iOS app on Appetize.io..."
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+              "https://api.appetize.io/v1/apps" \
+              -H "X-API-KEY: ${APPETIZE_TOKEN}" \
+              -H "Content-Type: multipart/form-data" \
+              -F "file=@${IOS_ZIP}" \
+              -F "platform=ios" \
+              -F "queueDuration=0")
+          fi
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          echo "HTTP Status: $HTTP_CODE"
+          echo "Response: $BODY"
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+            APP_KEY=$(echo "$BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('key',''))" 2>/dev/null || echo "")
+            if [ -n "$APP_KEY" ]; then
+              echo "Appetize.io iOS app key: $APP_KEY"
+              echo "View at: https://appetize.io/app/$APP_KEY"
+            fi
+          else
+            echo "Warning: Appetize.io upload failed with HTTP $HTTP_CODE"
+          fi
+
+  # ===========================================================================
+  # iOS Release Build — signed IPA uploaded to App Store Connect / TestFlight
+  # ===========================================================================
+  build-ios-release:
+    name: Build iOS Release (App Store)
+    runs-on: macos-latest
+    needs: [configure]
+    if: ${{ always() && !cancelled() && (github.event.inputs.platform == 'ios_release' || github.event.client_payload.platform == 'ios_release' || needs.configure.outputs.platform == 'ios_release') }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Read build config (push events)
+        if: github.event_name == 'push'
+        run: |
+          if [ -f ".pagepilot-build.json" ]; then
+            python3 -c "
+          import json, os
+          with open('.pagepilot-build.json') as f:
+              cfg = json.load(f)
+          out = os.environ['GITHUB_ENV']
+          mapping = {
+              'platform': 'PLATFORM',
+              'app_name': 'APP_NAME',
+              'package_name': 'PACKAGE_NAME',
+              'primary_color': 'PRIMARY_COLOR',
+              'api_url': 'API_URL',
+              'build_number': 'BUILD_NUMBER',
+              'app_icon_url': 'APP_ICON_URL',
+              'ios_team_id': 'IOS_TEAM_ID',
+              'asc_key_id': 'ASC_KEY_ID',
+              'asc_issuer_id': 'ASC_ISSUER_ID',
+          }
+          with open(out, 'a') as o:
+              for key, env_key in mapping.items():
+                  val = cfg.get(key, '')
+                  if val:
+                      o.write(f'{env_key}={val}\n')
+          "
+            echo "Build config loaded from .pagepilot-build.json"
+          fi
+
+      - name: Verify Apple credentials
+        env:
+          P12_SET: ${{ secrets.APPLE_CERTIFICATE != '' && '1' || '0' }}
+          PROFILE_SET: ${{ secrets.APPLE_PROVISION_PROFILE != '' && '1' || '0' }}
+          ASC_KEY_SET: ${{ secrets.ASC_PRIVATE_KEY != '' && '1' || '0' }}
+        run: |
+          MISSING=0
+          if [ -z "$IOS_TEAM_ID" ]; then echo "::error::IOS_TEAM_ID is missing"; MISSING=1; fi
+          if [ -z "$ASC_KEY_ID" ]; then echo "::error::ASC_KEY_ID is missing"; MISSING=1; fi
+          if [ -z "$ASC_ISSUER_ID" ]; then echo "::error::ASC_ISSUER_ID is missing"; MISSING=1; fi
+          if [ "$ASC_KEY_SET" != "1" ]; then echo "::error::ASC_PRIVATE_KEY secret is missing"; MISSING=1; fi
+          # .p12 / .mobileprovision are optional when ASC API key has Admin role — workflow can create them.
+          if [ "$P12_SET" != "1" ] && [ "$PROFILE_SET" != "1" ]; then
+            echo "No .p12/.mobileprovision uploaded — will auto-create via App Store Connect API."
+          elif [ "$P12_SET" != "1" ] || [ "$PROFILE_SET" != "1" ]; then
+            echo "::error::Upload BOTH .p12 and .mobileprovision, or NEITHER (auto-generate with ASC key)."
+            MISSING=1
+          fi
+          if [ "$MISSING" -ne 0 ]; then
+            echo "Configure Apple settings under PagePilot → Apple App Store Connect."
+            exit 1
+          fi
+
+      - name: Auto-create Apple signing materials via ASC API
+        id: auto_sign
+        env:
+          P12_BASE64: ${{ secrets.APPLE_CERTIFICATE }}
+          P12_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          PROFILE_BASE64: ${{ secrets.APPLE_PROVISION_PROFILE }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${P12_BASE64:-}" ] && [ -n "${PROFILE_BASE64:-}" ]; then
+            echo "Using uploaded .p12 and .mobileprovision."
+            echo "p12_path=" >> "$GITHUB_OUTPUT"
+            echo "profile_path=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -z "${ASC_PRIVATE_KEY:-}" ]; then
+            echo "::error::ASC_PRIVATE_KEY is required to auto-generate signing materials."
+            exit 1
+          fi
+          echo "Auto-generating distribution certificate and provisioning profile..."
+          VENV="$RUNNER_TEMP/pp_venv"
+          python3 -m venv "$VENV"
+          # shellcheck disable=SC1091
+          . "$VENV/bin/activate"
+          pip install --quiet 'PyJWT[crypto]'
+          python3 - <<'PY'
+          import base64, json, os, re, subprocess, sys, time, uuid
+          from pathlib import Path
+          import jwt as pyjwt
+
+          TEAM = os.environ["IOS_TEAM_ID"]
+          KEY_ID = os.environ["ASC_KEY_ID"]
+          ISSUER = os.environ["ASC_ISSUER_ID"]
+          BUNDLE = os.environ.get("PACKAGE_NAME", "com.pagepilot.app")
+          APP_NAME = os.environ.get("APP_NAME", "PagePilot")
+          ASC_KEY = os.environ["ASC_PRIVATE_KEY"].strip().strip('"').strip("'")
+          if "-----BEGIN" not in ASC_KEY:
+              try:
+                  ASC_KEY = base64.b64decode(ASC_KEY, validate=False).decode("utf-8")
+              except Exception:
+                  pass
+          if "\\n" in ASC_KEY and "\n" not in ASC_KEY:
+              ASC_KEY = ASC_KEY.replace("\\n", "\n")
+          ASC_KEY = ASC_KEY.strip() + "\n"
+          if "-----BEGIN" not in ASC_KEY:
+              print("::error::ASC_PRIVATE_KEY is not a valid PEM private key.", file=sys.stderr)
+              sys.exit(1)
+          TEMP = Path(os.environ["RUNNER_TEMP"])
+          P12_OUT = TEMP / "pagepilot_auto.p12"
+          PROFILE_OUT = TEMP / "pagepilot_auto.mobileprovision"
+          P12_PASS = os.environ.get("P12_PASSWORD") or "pagepilot-auto"
+          API = "https://api.appstoreconnect.apple.com/v1"
+
+          def sh(*args, **kwargs):
+              return subprocess.run(args, check=True, capture_output=True, text=True, **kwargs).stdout
+
+          # --- JWT ---
+          now = int(time.time())
+          token = pyjwt.encode(
+              {
+                  "iss": ISSUER,
+                  "iat": now,
+                  "exp": now + 1200,
+                  "aud": "appstoreconnect-v1",
+                  "jti": str(uuid.uuid4()),
+              },
+              ASC_KEY,
+              algorithm="ES256",
+              headers={"kid": KEY_ID, "typ": "JWT", "alg": "ES256"},
+          )
+          headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+          import urllib.request
+          import urllib.error
+
+          def api(method, path, body=None):
+              data = json.dumps(body).encode() if body is not None else None
+              req = urllib.request.Request(API + path, data=data, headers=headers, method=method)
+              try:
+                  with urllib.request.urlopen(req) as resp:
+                      raw = resp.read()
+                      return json.loads(raw) if raw else {}
+              except urllib.error.HTTPError as e:
+                  err = e.read().decode(errors="replace")
+                  # 409 = already exists; caller may handle
+                  raise RuntimeError(f"{method} {path} -> HTTP {e.code}: {err}") from None
+
+          # --- RSA key + CSR ---
+          key_pem = TEMP / "dist_key.pem"
+          csr_pem = TEMP / "dist.csr"
+          sh("openssl", "genrsa", "-out", str(key_pem), "2048")
+          sh(
+              "openssl", "req", "-new", "-key", str(key_pem), "-out", str(csr_pem),
+                "-subj", f"/CN=PagePilot {APP_NAME}/O=PagePilot/C=US",
+          )
+          csr_content = csr_pem.read_text()
+
+          # --- List existing distribution certs; revoke as needed (we need private key we just generated) ---
+          listing = api("GET", "/certificates?limit=100")
+          dist_certs = [
+              c for c in listing.get("data", [])
+              if c.get("attributes", {}).get("certificateType") in ("IOS_DISTRIBUTION", "APPLE_DISTRIBUTION")
+          ]
+          # CI generates a fresh key each run — revoke prior distribution certs so we can create a matching one.
+          for old in dist_certs:
+              try:
+                  api("DELETE", f"/certificates/{old['id']}")
+                  print(f"Revoked old certificate {old['id']}")
+              except Exception as e:
+                  print(f"Warn: could not revoke old cert {old.get('id')}: {e}")
+
+          # --- Create certificate from CSR (retry once if race/pending request) ---
+          cert_payload = {
+              "data": {
+                  "type": "certificates",
+                  "attributes": {
+                      "certificateType": "IOS_DISTRIBUTION",
+                      "csrContent": csr_content,
+                  },
+              }
+          }
+          try:
+              cert_resp = api("POST", "/certificates", cert_payload)
+          except Exception as e:
+              print(f"First cert create failed, waiting and retrying: {e}")
+              time.sleep(5)
+              # Clear any pending request by revoking REQUEST-type certs if present
+              listing2 = api("GET", "/certificates?limit=100")
+              for c in listing2.get("data", []):
+                  ctype = c.get("attributes", {}).get("certificateType", "")
+                  if "IOS_DISTRIBUTION" in ctype or "APPLE_DISTRIBUTION" in ctype or ctype == "IOS_DISTRIBUTION":
+                      try:
+                          api("DELETE", f"/certificates/{c['id']}")
+                          print(f"Revoked {c['id']} ({ctype})")
+                      except Exception as e2:
+                          print(f"Warn revoke: {e2}")
+              time.sleep(2)
+              cert_resp = api("POST", "/certificates", cert_payload)
+          cert_attrs = cert_resp["data"]["attributes"]
+          cert_b64 = cert_attrs["certificateContent"]  # base64 DER
+          cert_id = cert_resp["data"]["id"]
+          der = base64.b64decode(cert_b64)
+          cert_der = TEMP / "dist.der"
+          cert_der.write_bytes(der)
+          cert_pem = TEMP / "dist.crt"
+          sh("openssl", "x509", "-inform", "DER", "-in", str(cert_der), "-out", str(cert_pem))
+
+          # --- Package .p12 ---
+          sh(
+              "openssl", "pkcs12", "-export",
+              "-out", str(P12_OUT),
+              "-inkey", str(key_pem),
+              "-in", str(cert_pem),
+              "-passout", f"pass:{P12_PASS}",
+              "-name", "PagePilot Distribution",
+          )
+          print(f"Created {P12_OUT}")
+
+          # --- Ensure bundle ID (App ID) exists ---
+          bid_list = api("GET", f"/bundleIds?filter[identifier]={BUNDLE}&limit=100")
+          bundle_res_id = None
+          for b in bid_list.get("data", []):
+              if b.get("attributes", {}).get("identifier") == BUNDLE:
+                  bundle_res_id = b["id"]
+                  break
+          if not bundle_res_id:
+              safe_name = re.sub(r'[^A-Za-z0-9 .-]', '', f"{APP_NAME}").strip() or "PagePilot App"
+              if len(safe_name) > 50:
+                  safe_name = safe_name[:50].strip()
+              try:
+                  bid_create = api("POST", "/bundleIds", {
+                      "data": {
+                          "type": "bundleIds",
+                          "attributes": {
+                              "identifier": BUNDLE,
+                              "name": safe_name,
+                              "platform": "IOS",
+                              "seedId": TEAM,
+                          },
+                      }
+                  })
+                  bundle_res_id = bid_create["data"]["id"]
+                  print(f"Registered App ID {BUNDLE} -> {bundle_res_id}")
+              except Exception as e:
+                  bid_list = api("GET", f"/bundleIds?filter[identifier]={BUNDLE}&limit=100")
+                  for b in bid_list.get("data", []):
+                      if b.get("attributes", {}).get("identifier") == BUNDLE:
+                          bundle_res_id = b["id"]
+                          break
+                  if not bundle_res_id:
+                      raise
+                  print(f"App ID already existed -> {bundle_res_id} ({e})")
+
+          # --- Ensure App Store Connect app record exists (required for App Store profiles) ---
+          apps = api("GET", f"/apps?filter[bundleId]={BUNDLE}&limit=10")
+          app_res_id = None
+          for a in apps.get("data", []):
+              if a.get("attributes", {}).get("bundleId") == BUNDLE:
+                  app_res_id = a["id"]
+                  break
+          if not app_res_id:
+              try:
+                  app_create = api("POST", "/apps", {
+                      "data": {
+                          "type": "apps",
+                          "attributes": {
+                              "name": re.sub(r'[^A-Za-z0-9 .-]', '', APP_NAME).strip() or "PagePilot App",
+                              "primaryLanguage": "en",
+                              "sku": f"PP{KEY_ID}{abs(hash(BUNDLE)) % 10**6}",
+                              "bundleId": BUNDLE,
+                          },
+                          "relationships": {
+                              "bundleId": {"data": {"type": "bundleIds", "id": bundle_res_id}},
+                          },
+                      }
+                  })
+                  app_res_id = app_create["data"]["id"]
+                  print(f"Created App Store app record {app_res_id}")
+              except Exception as e:
+                  # App may already exist / race — continue; profile creation will surface real errors
+                  print(f"Warn: could not create app record (may already exist): {e}")
+
+          # --- Ensure App Store provisioning profile linked to this cert ---
+          profile_name = f"PagePilot {BUNDLE} AppStore"
+          # Remove duplicate/stale profiles with the same name (or same bundle) so create succeeds.
+          try:
+              existing_profiles = api("GET", "/profiles?limit=200")
+              for p in existing_profiles.get("data", []):
+                  attrs = p.get("attributes", {})
+                  rel_bundle = (p.get("relationships", {}).get("bundleId", {}) or {}).get("data", {}) or {}
+                  if attrs.get("name") == profile_name or rel_bundle.get("id") == bundle_res_id:
+                      try:
+                          api("DELETE", f"/profiles/{p['id']}")
+                          print(f"Deleted existing profile {p['id']} ({attrs.get('name')})")
+                      except Exception as pe:
+                          print(f"Warn: could not delete profile {p.get('id')}: {pe}")
+          except Exception as le:
+              print(f"Warn: could not list profiles: {le}")
+
+          profile_resp = api("POST", "/profiles", {
+              "data": {
+                  "type": "profiles",
+                  "attributes": {
+                      "name": profile_name,
+                      "profileType": "IOS_APP_STORE",
+                  },
+                  "relationships": {
+                      "bundleId": {"data": {"type": "bundleIds", "id": bundle_res_id}},
+                      "certificates": {"data": [{"type": "certificates", "id": cert_id}]},
+                  },
+              }
+          })
+          profile_b64 = profile_resp["data"]["attributes"]["profileContent"]
+          PROFILE_OUT.write_bytes(base64.b64decode(profile_b64))
+          print(f"Created provisioning profile {PROFILE_OUT}")
+
+          # Persist outputs for later steps
+          out = Path(os.environ["GITHUB_OUTPUT"])
+          with out.open("a") as f:
+              f.write(f"p12_path={P12_OUT}\n")
+              f.write(f"p12_password={P12_PASS}\n")
+              f.write(f"profile_path={PROFILE_OUT}\n")
+              f.write(f"profile_name={profile_name}\n")
+          PY
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'
+          channel: 'stable'
+
+      - name: Save our Dart code
+        run: |
+          cp -R lib /tmp/pagepilot_lib
+          cp pubspec.yaml /tmp/pagepilot_pubspec.yaml
+          cp pubspec.lock /tmp/pagepilot_pubspec.lock 2>/dev/null || true
+          cp analysis_options.yaml /tmp/pagepilot_analysis.yaml 2>/dev/null || true
+          cp flutter_launcher_icons.yaml /tmp/pagepilot_icons.yaml 2>/dev/null || true
+
+      - name: Generate Flutter scaffold (from settings)
+        run: |
+          PKG="${PACKAGE_NAME:-com.pagepilot.app}"
+          LAST="${PKG##*.}"
+          ORG="${PKG%.$LAST}"
+          PROJ=$(echo "$LAST" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
+          flutter create --project-name "$PROJ" --org "$ORG" --platforms ios .
+          cp /tmp/pagepilot_pubspec.yaml pubspec.yaml
+          cp /tmp/pagepilot_pubspec.lock pubspec.lock 2>/dev/null || true
+          cp /tmp/pagepilot_analysis.yaml analysis_options.yaml 2>/dev/null || true
+          cp /tmp/pagepilot_icons.yaml flutter_launcher_icons.yaml 2>/dev/null || true
+          rm -rf test/
+
+      - name: Apply app name, version, and bundle ID to iOS
+        run: |
+          python3 <<'PY'
+          import os, pathlib, re
+          app_name = os.environ.get('APP_NAME', 'PagePilot')
+          bundle = os.environ.get('PACKAGE_NAME', 'com.pagepilot.app')
+          build_number = os.environ.get('BUILD_NUMBER', '1')
+
+          plist = pathlib.Path('ios/Runner/Info.plist')
+          if plist.exists():
+              text = plist.read_text()
+              def set_plist_string(xml, key, value):
+                  pattern = rf'(<key>{re.escape(key)}</key>\s*<string>)[^<]*(</string>)'
+                  if re.search(pattern, xml):
+                      return re.sub(pattern, rf'\g<1>{value}\g<2>', xml, count=1)
+                  return xml
+              text = set_plist_string(text, 'CFBundleDisplayName', app_name)
+              text = set_plist_string(text, 'CFBundleName', app_name)
+              text = set_plist_string(text, 'CFBundleVersion', build_number)
+              plist.write_text(text)
+
+          pbx = pathlib.Path('ios/Runner.xcodeproj/project.pbxproj')
+          if pbx.exists():
+              text = pbx.read_text()
+              text = re.sub(
+                  r'PRODUCT_BUNDLE_IDENTIFIER = [^;]+;',
+                  f'PRODUCT_BUNDLE_IDENTIFIER = {bundle};',
+                  text,
+              )
+              text = re.sub(
+                  r'IPHONEOS_DEPLOYMENT_TARGET = [^;]+;',
+                  'IPHONEOS_DEPLOYMENT_TARGET = 15.0;',
+                  text,
+              )
+              team = os.environ.get('IOS_TEAM_ID', '').strip()
+              # Force manual distribution signing on every configuration block.
+              text = re.sub(r'CODE_SIGN_STYLE = [^;]+;', 'CODE_SIGN_STYLE = Manual;', text)
+              text = re.sub(r'CODE_SIGN_IDENTITY = [^;]+;', 'CODE_SIGN_IDENTITY = "Apple Distribution";', text)
+              text = re.sub(r'CODE_SIGNING_REQUIRED = [^;]+;', 'CODE_SIGNING_REQUIRED = YES;', text)
+              text = re.sub(r'CODE_SIGNING_ALLOWED = [^;]+;', 'CODE_SIGNING_ALLOWED = YES;', text)
+              profile_name_env = os.environ.get('PROFILE_NAME', '').strip()
+              if profile_name_env:
+                  if re.search(r'PROVISIONING_PROFILE_SPECIFIER = [^;]*;', text):
+                      text = re.sub(r'PROVISIONING_PROFILE_SPECIFIER = [^;]*;', f'PROVISIONING_PROFILE_SPECIFIER = "{profile_name_env}";', text)
+                  else:
+                      text = re.sub(r'(PRODUCT_BUNDLE_IDENTIFIER = [^;]+;)', rf'\1\n\t\t\t\tPROVISIONING_PROFILE_SPECIFIER = "{profile_name_env}";', text)
+              if team:
+                  if re.search(r'DEVELOPMENT_TEAM = [^;]+;', text):
+                      text = re.sub(r'DEVELOPMENT_TEAM = [^;]+;', f'DEVELOPMENT_TEAM = {team};', text)
+                  else:
+                      text = re.sub(
+                          r'(PRODUCT_BUNDLE_IDENTIFIER = [^;]+;)',
+                          rf'\1\n\t\t\t\tDEVELOPMENT_TEAM = {team};',
+                          text,
+                      )
+              # Ensure CODE_SIGN_STYLE exists even if pbx had none
+              if 'CODE_SIGN_STYLE' not in text:
+                  text = re.sub(
+                      r'(PRODUCT_BUNDLE_IDENTIFIER = [^;]+;)',
+                      r'\1\n\t\t\t\tCODE_SIGN_STYLE = Manual;',
+                      text,
+                  )
+              pbx.write_text(text)
+              print('Signing settings applied to project.pbxproj')
+          print(f'App: {app_name} | Bundle: {bundle} | Build: {build_number} | Team: {os.environ.get("IOS_TEAM_ID","")}')
+          PY
+
+      - name: Download app icon and generate launcher icons
+        if: env.APP_ICON_URL != ''
+        run: |
+          set -e
+          mkdir -p assets/images
+          flutter pub get
+          curl -fsSL "${APP_ICON_URL}" -o assets/images/app_icon.png
+          if file assets/images/app_icon.png | grep -qi 'web/p\|webp'; then
+            if command -v sips >/dev/null 2>&1; then
+              sips -s format png assets/images/app_icon.png --out assets/images/app_icon_converted.png >/dev/null
+              mv assets/images/app_icon_converted.png assets/images/app_icon.png
+            else
+              python3 - <<'PY'
+          from pathlib import Path
+          try:
+              from PIL import Image
+          except ImportError:
+              raise SystemExit(0)
+          p = Path('assets/images/app_icon.png')
+          img = Image.open(p)
+          img.save(p, format='PNG')
+          PY
+            fi
+          fi
+          BG="${PRIMARY_COLOR:-#FFFFFF}"
+          printf '%s\n' \
+            'flutter_launcher_icons:' \
+            '  android: false' \
+            '  ios: true' \
+            '  image_path: "assets/images/app_icon.png"' \
+            '  remove_alpha_ios: true' \
+            > flutter_launcher_icons.yaml
+          echo "flutter_launcher_icons.yaml:"
+          cat flutter_launcher_icons.yaml
+          dart run flutter_launcher_icons
+
+      - name: Restore Dart code
+        run: |
+          rm -rf lib
+          cp -R /tmp/pagepilot_lib lib
+
+      - name: Install Apple distribution certificate
+        env:
+          P12_BASE64: ${{ secrets.APPLE_CERTIFICATE }}
+          P12_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          AUTO_P12: ${{ steps.auto_sign.outputs.p12_path }}
+          AUTO_P12_PASSWORD: ${{ steps.auto_sign.outputs.p12_password }}
+        run: |
+          set -e
+          KEYCHAIN_PATH="$RUNNER_TEMP/pagepilot-build.keychain-db"
+          KEYCHAIN_PASSWORD="pagepilot"
+
+          if [ -n "${AUTO_P12:-}" ] && [ -f "$AUTO_P12" ]; then
+            cp "$AUTO_P12" "$RUNNER_TEMP/dist.p12"
+            IMPORT_PASS="${AUTO_P12_PASSWORD:-pagepilot-auto}"
+          else
+            echo "$P12_BASE64" | base64 --decode > "$RUNNER_TEMP/dist.p12"
+            IMPORT_PASS="$P12_PASSWORD"
+          fi
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" || true
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          LOGIN_KC="$HOME/Library/Keychains/login.keychain-db"
+          if [ ! -f "$LOGIN_KC" ]; then LOGIN_KC="login.keychain-db"; fi
+          security list-keychains -d user -s "$KEYCHAIN_PATH" "$LOGIN_KC"
+          security default-keychain -s "$KEYCHAIN_PATH"
+          security import "$RUNNER_TEMP/dist.p12" -k "$KEYCHAIN_PATH" -P "$IMPORT_PASS" -T /usr/bin/codesign -T /usr/bin/security -f pkcs12
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          echo "Identities:"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH" || true
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+          echo "KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD" >> "$GITHUB_ENV"
+
+      - name: Install provisioning profile
+        env:
+          PROFILE_BASE64: ${{ secrets.APPLE_PROVISION_PROFILE }}
+          AUTO_PROFILE: ${{ steps.auto_sign.outputs.profile_path }}
+        run: |
+          set -e
+          PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$PROFILE_DIR"
+
+          if [ -n "${AUTO_PROFILE:-}" ] && [ -f "$AUTO_PROFILE" ]; then
+            cp "$AUTO_PROFILE" "$RUNNER_TEMP/profile.mobileprovision"
+          else
+            echo "$PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/profile.mobileprovision"
+          fi
+
+          # Extract UUID from the profile and install with the canonical name.
+          UUID=$(security cms -D -i "$RUNNER_TEMP/profile.mobileprovision" | python3 -c "import sys,plistlib; print(plistlib.loads(sys.stdin.buffer.read())['UUID'])")
+          cp "$RUNNER_TEMP/profile.mobileprovision" "$PROFILE_DIR/$UUID.mobileprovision"
+          echo "Installed provisioning profile UUID: $UUID"
+          echo "PROFILE_UUID=$UUID" >> "$GITHUB_ENV"
+
+      - name: Write ExportOptions.plist
+        env:
+          PROFILE_UUID: ${{ env.PROFILE_UUID }}
+        run: |
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store-connect</string>
+            <key>teamID</key>
+            <string>${IOS_TEAM_ID}</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>uploadBitcode</key>
+            <false/>
+            <key>uploadSymbols</key>
+            <true/>
+            <key>destination</key>
+            <string>export</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>${PACKAGE_NAME}</key>
+              <string>${PROFILE_UUID}</string>
+            </dict>
+          </dict>
+          </plist>
+          PLIST
+          cat "$RUNNER_TEMP/ExportOptions.plist"
+
+      - name: Install App Store Connect API key
+        env:
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        run: |
+          set -e
+          KEY_DIR="$HOME/.appstoreconnect/private_keys"
+          mkdir -p "$KEY_DIR"
+          printf '%s\n' "$ASC_PRIVATE_KEY" > "$KEY_DIR/AuthKey_${ASC_KEY_ID}.p8"
+          # Normalize PEM if secret was stored as base64 / escaped newlines
+          if ! grep -q '-----BEGIN' "$KEY_DIR/AuthKey_${ASC_KEY_ID}.p8"; then
+            python3 - <<'PYK'
+          import base64, pathlib, os
+          p = pathlib.Path(os.environ["HOME"]) / ".appstoreconnect/private_keys" / f"AuthKey_{os.environ['ASC_KEY_ID']}.p8"
+          raw = p.read_text().strip()
+          try:
+              dec = base64.b64decode(raw, validate=False).decode("utf-8")
+              if "-----BEGIN" in dec:
+                  p.write_text(dec.strip() + "\n")
+          except Exception:
+              pass
+          PYK
+          fi
+          if ! grep -q '-----BEGIN' "$KEY_DIR/AuthKey_${ASC_KEY_ID}.p8"; then
+            python3 - <<'PYK2'
+          import os, pathlib
+          p = pathlib.Path(os.environ["HOME"]) / ".appstoreconnect/private_keys" / f"AuthKey_{os.environ['ASC_KEY_ID']}.p8"
+          t = p.read_text()
+          if "\\n" in t and "\n" not in t:
+              p.write_text(t.replace("\\n", "\n"))
+          PYK2
+          fi
+          chmod 600 "$KEY_DIR/AuthKey_${ASC_KEY_ID}.p8"
+          head -1 "$KEY_DIR/AuthKey_${ASC_KEY_ID}.p8"
+          echo "ASC key installed for Key ID ${ASC_KEY_ID}"
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Build signed iOS IPA (App Store)
+        env:
+          PROFILE_NAME: ${{ steps.auto_sign.outputs.profile_name }}
+        run: |
+          set -eo pipefail
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" "$HOME/Library/Keychains/login.keychain-db"
+          echo "Available signing identities:"
+          security find-identity -v -p codesigning || true
+
+          # Build Flutter iOS app without signing, then archive/export with explicit manual settings on Runner only.
+          flutter build ios --release --no-codesign
+
+          python3 <<'PY'
+          import os, pathlib, re
+          pbx = pathlib.Path('ios/Runner.xcodeproj/project.pbxproj')
+          text = pbx.read_text()
+          team = os.environ.get('IOS_TEAM_ID', '').strip()
+          profile_name = os.environ.get('PROFILE_NAME', '').strip()
+          profile_uuid = os.environ.get('PROFILE_UUID', '').strip()
+          # Force manual distribution signing only in Runner pbxproj (Pods must stay without profile overrides).
+          text = re.sub(r'CODE_SIGN_STYLE = [^;]+;', 'CODE_SIGN_STYLE = Manual;', text)
+          text = re.sub(r'CODE_SIGN_IDENTITY = [^;]+;', 'CODE_SIGN_IDENTITY = "Apple Distribution";', text)
+          text = re.sub(r'CODE_SIGNING_REQUIRED = [^;]+;', 'CODE_SIGNING_REQUIRED = YES;', text)
+          text = re.sub(r'CODE_SIGNING_ALLOWED = [^;]+;', 'CODE_SIGNING_ALLOWED = YES;', text)
+          if profile_name:
+              if re.search(r'PROVISIONING_PROFILE_SPECIFIER = [^;]*;', text):
+                  text = re.sub(r'PROVISIONING_PROFILE_SPECIFIER = [^;]*;', f'PROVISIONING_PROFILE_SPECIFIER = "{profile_name}";', text)
+              else:
+                  text = re.sub(r'(PRODUCT_BUNDLE_IDENTIFIER = [^;]+;)', rf'\1\n\t\t\t\tPROVISIONING_PROFILE_SPECIFIER = "{profile_name}";', text)
+          if profile_uuid:
+              if re.search(r'PROVISIONING_PROFILE = [^;]*;', text):
+                  text = re.sub(r'PROVISIONING_PROFILE = [^;]*;', f'PROVISIONING_PROFILE = {profile_uuid};', text)
+              else:
+                  text = re.sub(r'(PRODUCT_BUNDLE_IDENTIFIER = [^;]+;)', rf'\1\n\t\t\t\tPROVISIONING_PROFILE = {profile_uuid};', text)
+          if team:
+              if re.search(r'DEVELOPMENT_TEAM = [^;]+;', text):
+                  text = re.sub(r'DEVELOPMENT_TEAM = [^;]+;', f'DEVELOPMENT_TEAM = {team};', text)
+              else:
+                  text = re.sub(r'(PRODUCT_BUNDLE_IDENTIFIER = [^;]+;)', rf'\1\n\t\t\t\tDEVELOPMENT_TEAM = {team};', text)
+          pbx.write_text(text)
+          print(f'Patched Runner signing: team={team} profile_name={profile_name} uuid={profile_uuid}')
+          PY
+
+          # Only override settings that are safe project-wide; profile identity lives in Runner pbxproj.
+          # Do NOT pass PROVISIONING_PROFILE* here — command-line overrides apply to Pods targets too,
+          # and Pods cannot accept provisioning profiles.
+          xcodebuild -workspace ios/Runner.xcworkspace -scheme Runner -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/Runner.xcarchive" \
+            archive \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            DEVELOPMENT_TEAM="$IOS_TEAM_ID" \
+            CODE_SIGNING_REQUIRED=YES \
+            CODE_SIGNING_ALLOWED=YES \
+            OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN_PATH" \
+            2>&1 | tee "$RUNNER_TEMP/xcodebuild_archive.log"
+
+          if [ ! -d "$RUNNER_TEMP/Runner.xcarchive" ]; then
+            echo "::error::Archive was not created"
+            exit 1
+          fi
+
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/Runner.xcarchive" \
+            -exportPath "$RUNNER_TEMP/ipa" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            2>&1 | tee "$RUNNER_TEMP/xcodebuild_export.log"
+
+          mkdir -p build/ios/ipa
+          cp "$RUNNER_TEMP/ipa"/*.ipa build/ios/ipa/
+          ls -la build/ios/ipa/
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-ipa-${{ env.BUILD_NUMBER }}
+          path: build/ios/ipa/*.ipa
+          retention-days: 30
+
+      - name: Ensure App Store Connect app record
+        env:
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        run: |
+          set -e
+          VENV="$RUNNER_TEMP/pp_asc_venv"
+          python3 -m venv "$VENV"
+          # shellcheck disable=SC1091
+          . "$VENV/bin/activate"
+          pip install --quiet 'PyJWT[crypto]'
+          python3 <<'PY'
+          import base64, json, os, pathlib, re, time, urllib.error, urllib.request
+
+          KEY_ID = os.environ.get('ASC_KEY_ID', '').strip()
+          ISSUER = os.environ.get('ASC_ISSUER_ID', '').strip()
+          BUNDLE = os.environ.get('PACKAGE_NAME', '').strip()
+          APP_NAME = os.environ.get('APP_NAME', 'PagePilot App').strip()
+          KEY_PATH = pathlib.Path.home() / '.appstoreconnect/private_keys' / f'AuthKey_{KEY_ID}.p8'
+
+          raw = os.environ.get('ASC_PRIVATE_KEY', '').strip().strip('"').strip("'")
+          if raw and '-----BEGIN' not in raw:
+              try:
+                  dec = base64.b64decode(raw, validate=False).decode('utf-8')
+                  if '-----BEGIN' in dec:
+                      raw = dec
+              except Exception:
+                  pass
+          if raw and '\\n' in raw and '\n' not in raw:
+              raw = raw.replace('\\n', '\n')
+          pem = raw if '-----BEGIN' in raw else KEY_PATH.read_text().strip() if KEY_PATH.exists() else ''
+          if '-----BEGIN' not in pem:
+              print('::error::ASC_PRIVATE_KEY is not a valid PEM private key')
+              raise SystemExit(1)
+
+          # Build ES256 JWT (no scope — Apple rejects illegal scopes on some ops)
+          import jwt as pyjwt
+          token = pyjwt.encode(
+              {
+                  'iss': ISSUER,
+                  'iat': int(time.time()),
+                  'exp': int(time.time()) + 1200,
+                  'aud': 'appstoreconnect-v1',
+              },
+              pem,
+              algorithm='ES256',
+              headers={'kid': KEY_ID, 'typ': 'JWT', 'alg': 'ES256'},
+          )
+          if isinstance(token, bytes):
+              token = token.decode()
+
+          def api(method, path, body=None):
+              url = f'https://api.appstoreconnect.apple.com/v1{path}'
+              data = json.dumps(body).encode() if body is not None else None
+              req = urllib.request.Request(url, data=data, method=method, headers={
+                  'Authorization': f'Bearer {token}',
+                  'Content-Type': 'application/json',
+                  'Accept': 'application/json',
+              })
+              try:
+                  with urllib.request.urlopen(req, timeout=60) as r:
+                      return r.status, json.loads(r.read().decode() or '{}')
+              except urllib.error.HTTPError as e:
+                  raw = e.read().decode(errors='replace')
+                  try:
+                      return e.code, json.loads(raw)
+                  except Exception:
+                      return e.code, {'raw': raw}
+
+          def list_apps(limit=100, link=None):
+              path = link if link else f'/apps?limit={limit}'
+              st, body = api('GET', path)
+              return st, body
+
+          # Diagnostics: list every app this key can see (proper encoding)
+          import urllib.parse
+          qs = urllib.parse.urlencode({'filter[bundleId]': BUNDLE, 'limit': 50})
+          st, body = api('GET', f'/apps?{qs}')
+          print(f'GET /apps?filter[bundleId]={BUNDLE} status:', st)
+          found = None
+          for a in (body.get('data') or []):
+              attrs = a.get('attributes') or {}
+              if attrs.get('bundleId') == BUNDLE:
+                  found = a
+                  break
+
+          if not found:
+              # Fallback: unfiltered list (shows what the key can access)
+              st2, body2 = list_apps()
+              print('GET /apps (unfiltered) status:', st2)
+              all_apps = body2.get('data') or []
+              print(f'Apps visible to this key: {len(all_apps)}')
+              for a in all_apps[:50]:
+                  attrs = a.get('attributes') or {}
+                  print(f"  - {attrs.get('bundleId')} | {attrs.get('name')} | id={a.get('id')}")
+              # Also check whether the bundle ID is registered at all
+              qs2 = urllib.parse.urlencode({'filter[identifier]': BUNDLE, 'limit': 10})
+              st3, body3 = api('GET', f'/bundleIds?{qs2}')
+              print(f'GET /bundleIds?filter[identifier]={BUNDLE} status:', st3)
+              for b in (body3.get('data') or []):
+                  battrs = b.get('attributes') or {}
+                  print(f"  - registered: {battrs.get('identifier')} id={b.get('id')} platform={battrs.get('platform')}")
+              for a in all_apps:
+                  attrs = a.get('attributes') or {}
+                  if attrs.get('bundleId') == BUNDLE:
+                      found = a
+                      break
+
+          if found:
+              print('App exists:', found['id'], (found.get('attributes') or {}).get('name'),
+                    (found.get('attributes') or {}).get('bundleId'))
+              raise SystemExit(0)
+
+          print(f'App record not found for {BUNDLE}; attempting create...')
+          safe_name = re.sub(r'[^A-Za-z0-9 .-]', '', APP_NAME).strip() or 'PagePilot App'
+          status, resp = api('POST', '/apps', {
+              'data': {
+                  'type': 'apps',
+                  'attributes': {
+                      'name': safe_name,
+                      'primaryLanguage': 'en',
+                      'sku': f'PP{KEY_ID}{abs(hash(BUNDLE)) % 10**8}',
+                      'bundleId': BUNDLE,
+                  },
+              }
+          })
+          print('POST /apps status:', status)
+          print(json.dumps(resp, indent=2)[:2000])
+          if status in (200, 201):
+              print('Created app record')
+              raise SystemExit(0)
+
+          detail = ''
+          errs = resp.get('errors') or []
+          if errs:
+              detail = errs[0].get('detail') or errs[0].get('title') or ''
+          if status == 403:
+              print('::error::ASC key cannot CREATE apps (' + detail + '). Create the app once in App Store Connect for bundle ID ' + BUNDLE + ', or upload an ASC API key with App Manager role that can create apps, then re-run.')
+          else:
+              print('::error::App Store Connect app record missing and could not be created (HTTP ' + str(status) + '). Create the app once in App Store Connect (bundle ID ' + BUNDLE + ') or use an ASC API key with App Manager role, then re-run.')
+          raise SystemExit(1)
+          PY
+
+      - name: Upload to App Store Connect (TestFlight)
+        env:
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        run: |
+          set -e
+          IPA=$(ls build/ios/ipa/*.ipa | head -n 1)
+          if [ -z "$IPA" ]; then
+            echo "::error::IPA not found"
+            exit 1
+          fi
+          echo "Uploading $IPA to App Store Connect..."
+          xcrun altool --upload-app -f "$IPA" -t ios \
+            --apiKey "$ASC_KEY_ID" \
+            --apiIssuer "$ASC_ISSUER_ID" \
+            --verbose
+          echo "Upload complete. Process the build in App Store Connect → TestFlight."
+
+      - name: Cleanup keychain
+        if: always()
+        run: |
+          if [ -n "$KEYCHAIN_PATH" ] && [ -f "$KEYCHAIN_PATH" ]; then
+            security delete-keychain "$KEYCHAIN_PATH" || true
+          fi
+
