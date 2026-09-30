@@ -1,6 +1,6 @@
 {
-    "trigger_id": "e46360fc-0fe6-42b6-bc7e-edc25c3f0e79",
-    "platform": "android",
+    "trigger_id": "1e6508b7-e599-4185-a614-4de7a88d2677",
+    "platform": "aab",
     "app_name": "My Lifter App",
     "package_name": "com.lftlms.app",
     "primary_color": "#0073aa",
