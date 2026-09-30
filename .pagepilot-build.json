@@ -1,6 +1,6 @@
 {
-    "trigger_id": "90b6eb52-0647-4e22-a471-26151fd5d0ea",
-    "platform": "ios",
+    "trigger_id": "e41883a7-6600-47f1-a144-9c0b07867354",
+    "platform": "ios_release",
     "app_name": "My Lifter App",
     "package_name": "com.lftlms.app",
     "primary_color": "#0073aa",
